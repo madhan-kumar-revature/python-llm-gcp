@@ -1,7 +1,7 @@
 #!/bin/bash
 set -e
 
-PROJECT_ID="project-cd9f1644-7a59-430b-ad4"
+PROJECT_ID="<YOUR_PROJECT_ID>"
 REGION="us-central1"
 
 # ─── Prerequisites Check ──────────────────────────────────────────────────────

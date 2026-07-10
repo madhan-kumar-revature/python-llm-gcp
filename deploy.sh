@@ -66,6 +66,8 @@ echo ""
 echo ">> Environment Variables (.env)"
 check_env_var "GEMINI_API_KEY" "Add your LLM API key — GEMINI_API_KEY=your-key-here"
 check_env_var "MODEL_NAME"     "Add your model name — MODEL_NAME=gemini-2.5-flash"
+check_env_var "TTYD_USER"      "Add a terminal username — TTYD_USER=yourname"
+check_env_var "TTYD_PASS"      "Add a terminal password — TTYD_PASS=yourpassword"
 
 echo ""
 if [ "$PASS" = false ]; then
@@ -92,7 +94,7 @@ RUN apt-get update && apt-get install -y curl && \
 WORKDIR /app
 COPY . .
 RUN pip install -r requirements.txt
-CMD ["ttyd", "--port", "7681", "--writable", "python3", "main.py"]
+CMD ["sh", "-c", "ttyd --port 7681 --writable --credential \"${TTYD_USER}:${TTYD_PASS}\" python3 main.py"]
 EOF
   echo "  [OK] Dockerfile created"
 else
@@ -125,9 +127,12 @@ gcloud services enable run.googleapis.com cloudbuild.googleapis.com artifactregi
 STUDENT_EMAIL=$(gcloud config get-value account)
 SERVICE_NAME="llm-app-$(echo $STUDENT_EMAIL | cut -d'@' -f1 | tr '.' '-' | tr '[:upper:]' '[:lower:]')"
 
-# Read API key from their .env
-GEMINI_API_KEY=$(grep GEMINI_API_KEY .env | cut -d'=' -f2)
-MODEL_NAME=$(grep MODEL_NAME .env | cut -d'=' -f2 || echo "gemini-2.5-flash")
+# Read values from .env
+GEMINI_API_KEY=$(grep '^GEMINI_API_KEY=' .env | cut -d'=' -f2)
+MODEL_NAME=$(grep '^MODEL_NAME=' .env | cut -d'=' -f2)
+MODEL_NAME="${MODEL_NAME:-gemini-2.5-flash}"
+TTYD_USER=$(grep '^TTYD_USER=' .env | cut -d'=' -f2)
+TTYD_PASS=$(grep '^TTYD_PASS=' .env | cut -d'=' -f2)
 
 echo "Deploying as: $SERVICE_NAME"
 
@@ -140,7 +145,7 @@ gcloud run deploy "$SERVICE_NAME" \
   --concurrency 1 \
   --min-instances 0 \
   --timeout 3600 \
-  --set-env-vars GEMINI_API_KEY="$GEMINI_API_KEY",MODEL_NAME="$MODEL_NAME"
+  --set-env-vars GEMINI_API_KEY="$GEMINI_API_KEY",MODEL_NAME="$MODEL_NAME",TTYD_USER="$TTYD_USER",TTYD_PASS="$TTYD_PASS"
 
 echo ""
 echo "Your app is live at:"

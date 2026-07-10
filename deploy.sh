@@ -116,16 +116,15 @@ fi
 
 echo ""
 
-# ─── Enable Required APIs ─────────────────────────────────────────────────────
-
-# Enable required APIs (safe to run repeatedly — no-op if already enabled)
-gcloud services enable run.googleapis.com cloudbuild.googleapis.com artifactregistry.googleapis.com \
-  --project "$PROJECT_ID" --quiet
-
-# Derive unique service name from their gcloud logged-in email
-# e.g. john.doe@gmail.com → llm-app-john-doe
+# ─── Derive per-student resource names ───────────────────────────────────────
+# john.doe@gmail.com → john-doe
+# Truncated to 20 chars so GCS bucket name stays under 63-char limit
 STUDENT_EMAIL=$(gcloud config get-value account)
-SERVICE_NAME="llm-app-$(echo $STUDENT_EMAIL | cut -d'@' -f1 | tr '.' '-' | tr '[:upper:]' '[:lower:]')"
+STUDENT_NAME=$(echo "$STUDENT_EMAIL" | cut -d'@' -f1 | tr '.' '-' | tr '[:upper:]' '[:lower:]' | cut -c1-20)
+SERVICE_NAME="llm-app-${STUDENT_NAME}"
+AR_REPO="${SERVICE_NAME}"
+SRC_BUCKET="llm-src-${STUDENT_NAME}-${PROJECT_ID}"
+IMAGE_URI="${REGION}-docker.pkg.dev/${PROJECT_ID}/${AR_REPO}/${SERVICE_NAME}:latest"
 
 # Read values from .env
 GEMINI_API_KEY=$(grep '^GEMINI_API_KEY=' .env | cut -d'=' -f2)
@@ -135,9 +134,46 @@ TTYD_USER=$(grep '^TTYD_USER=' .env | cut -d'=' -f2)
 TTYD_PASS=$(grep '^TTYD_PASS=' .env | cut -d'=' -f2)
 
 echo "Deploying as: $SERVICE_NAME"
+echo ""
 
+# ─── Create per-student Artifact Registry repository ─────────────────────────
+if ! gcloud artifacts repositories describe "$AR_REPO" \
+     --location="$REGION" --project="$PROJECT_ID" &>/dev/null; then
+  echo "Creating Artifact Registry repository: $AR_REPO"
+  gcloud artifacts repositories create "$AR_REPO" \
+    --repository-format=docker \
+    --location="$REGION" \
+    --project="$PROJECT_ID" \
+    --quiet
+else
+  echo "  [OK] Artifact Registry repository already exists: $AR_REPO"
+fi
+
+# ─── Create per-student Cloud Storage bucket ──────────────────────────────────
+if ! gsutil ls "gs://${SRC_BUCKET}" &>/dev/null; then
+  echo "Creating Cloud Storage bucket: gs://${SRC_BUCKET}"
+  gsutil mb -p "$PROJECT_ID" -l "$REGION" "gs://${SRC_BUCKET}"
+else
+  echo "  [OK] Cloud Storage bucket already exists: gs://${SRC_BUCKET}"
+fi
+
+echo ""
+
+# ─── Build Docker image via Cloud Build ──────────────────────────────────────
+echo "Building Docker image..."
+gcloud builds submit . \
+  --tag "$IMAGE_URI" \
+  --gcs-source-staging-dir "gs://${SRC_BUCKET}/source" \
+  --logsBucket "gs://${SRC_BUCKET}/logs" \
+  --project "$PROJECT_ID" \
+  --region "$REGION"
+
+echo ""
+
+# ─── Deploy to Cloud Run ──────────────────────────────────────────────────────
+echo "Deploying to Cloud Run..."
 gcloud run deploy "$SERVICE_NAME" \
-  --source . \
+  --image "$IMAGE_URI" \
   --project "$PROJECT_ID" \
   --region "$REGION" \
   --allow-unauthenticated \

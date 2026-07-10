@@ -14,8 +14,8 @@ echo "========================================"
 echo ""
 echo "This will delete:"
 echo "  - All Cloud Run services matching 'llm-app-*'"
-echo "  - Their images from Artifact Registry"
-echo "  - Source zips from Cloud Storage"
+echo "  - Their Artifact Registry repositories (llm-app-*)"
+echo "  - Their Cloud Storage buckets (llm-src-*)"
 echo "  - IAM roles added to the Compute Engine SA"
 echo ""
 read -p "Are you sure? (yes/no): " CONFIRM
@@ -46,35 +46,36 @@ else
 fi
 
 echo ""
-echo "--- Step 2: Deleting images from Artifact Registry ---"
+echo "--- Step 2: Deleting per-student Artifact Registry repositories ---"
 
-IMAGES=$(gcloud artifacts docker images list \
-  "us-central1-docker.pkg.dev/$PROJECT_ID/cloud-run-source-deploy" \
-  --project="$PROJECT_ID" \
-  --filter="package~llm-app-" \
-  --format="value(package)" 2>/dev/null | sort -u)
-
-if [ -z "$IMAGES" ]; then
-  echo "No llm-app-* images found in Artifact Registry."
-else
-  for IMAGE in $IMAGES; do
-    echo "Deleting image: $IMAGE"
-    gcloud artifacts docker images delete "$IMAGE" \
+if [ -n "$SERVICES" ]; then
+  for SERVICE in $SERVICES; do
+    echo "Deleting AR repository: $SERVICE"
+    gcloud artifacts repositories delete "$SERVICE" \
+      --location="$REGION" \
       --project="$PROJECT_ID" \
-      --quiet \
-      --delete-tags 2>/dev/null || echo "  Skipped (already gone or permission issue)"
+      --quiet 2>/dev/null || echo "  Skipped: $SERVICE (not found)"
   done
+else
+  echo "Nothing to delete."
 fi
 
 echo ""
-echo "--- Step 3: Deleting source zips from Cloud Storage ---"
+echo "--- Step 3: Deleting per-student Cloud Storage buckets ---"
 
-BUCKET="run-sources-${PROJECT_ID}-${REGION}"
-if gsutil ls "gs://$BUCKET/services/llm-app-*" &>/dev/null; then
-  echo "Deleting source zips from gs://$BUCKET"
-  gsutil -m rm -r "gs://$BUCKET/services/llm-app-*" 2>/dev/null || echo "  Skipped (already empty)"
+if [ -n "$SERVICES" ]; then
+  for SERVICE in $SERVICES; do
+    STUDENT_NAME="${SERVICE#llm-app-}"
+    SRC_BUCKET="llm-src-${STUDENT_NAME}-${PROJECT_ID}"
+    if gsutil ls "gs://${SRC_BUCKET}" &>/dev/null; then
+      echo "Deleting bucket: gs://${SRC_BUCKET}"
+      gsutil -m rm -r "gs://${SRC_BUCKET}" 2>/dev/null || echo "  Skipped: ${SRC_BUCKET}"
+    else
+      echo "  Bucket not found, skipping: gs://${SRC_BUCKET}"
+    fi
+  done
 else
-  echo "No source zips found in gs://$BUCKET"
+  echo "Nothing to delete."
 fi
 
 echo ""

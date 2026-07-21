@@ -208,7 +208,13 @@ echo ""
 
 # ─── Deploy to Cloud Run ──────────────────────────────────────────────────────
 echo "Deploying to Cloud Run..."
-SERVICE_URL=$(gcloud run deploy "$SERVICE_NAME" \
+
+# 'gcloud run deploy' calls run.services.get before creating — students don't
+# have run.services.get in groupCreator (prevents cross-student env var visibility).
+# 'services create' goes direct to the API with no prior GET — needs only run.services.create.
+# 'services update' is the redeploy path — needs run.developer which Eventarc
+# grants automatically after the first deploy.
+SERVICE_URL=$(gcloud run services create "$SERVICE_NAME" \
   --image "$IMAGE_URI" \
   --project "$PROJECT_ID" \
   --region "$REGION" \
@@ -216,12 +222,30 @@ SERVICE_URL=$(gcloud run deploy "$SERVICE_NAME" \
   --concurrency 1 \
   --min-instances 0 \
   --timeout 3600 \
-  --set-env-vars GEMINI_API_KEY="$GEMINI_API_KEY",MODEL_NAME="$MODEL_NAME",TTYD_USER="$TTYD_USER",TTYD_PASS="$TTYD_PASS" \
-  --format="value(status.url)")
+  --set-env-vars "GEMINI_API_KEY=${GEMINI_API_KEY},MODEL_NAME=${MODEL_NAME},TTYD_USER=${TTYD_USER},TTYD_PASS=${TTYD_PASS}" \
+  --format="value(status.url)" \
+  --quiet 2>/tmp/run-create.err) && \
+  echo "  [OK] Service created" || {
+    if grep -qi "already exist" /tmp/run-create.err; then
+      echo "  Service already exists — redeploying..."
+      gcloud run services update "$SERVICE_NAME" \
+        --image "$IMAGE_URI" \
+        --project "$PROJECT_ID" \
+        --region "$REGION" \
+        --port 7681 \
+        --concurrency 1 \
+        --min-instances 0 \
+        --timeout 3600 \
+        --set-env-vars "GEMINI_API_KEY=${GEMINI_API_KEY},MODEL_NAME=${MODEL_NAME},TTYD_USER=${TTYD_USER},TTYD_PASS=${TTYD_PASS}" \
+        --quiet
+      echo "  [OK] Service updated"
+      SERVICE_URL=$(gcloud run services describe "$SERVICE_NAME" \
+        --project "$PROJECT_ID" --region "$REGION" \
+        --format="value(status.url)")
+    else
+      echo "  [ERROR] $(cat /tmp/run-create.err)"; exit 1
+    fi
+  }
 
 echo ""
-# URL is captured from the deploy response directly.
-# 'gcloud run services describe' was removed — run.services.get is no longer in
-# groupCreator (to prevent cross-student env var visibility), and Eventarc hasn't
-# granted run.developer yet at this point in the script.
 echo "Your app is live at: $SERVICE_URL"

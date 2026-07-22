@@ -209,43 +209,88 @@ echo ""
 # ─── Deploy to Cloud Run ──────────────────────────────────────────────────────
 echo "Deploying to Cloud Run..."
 
-# 'gcloud run deploy' calls run.services.get before creating — students don't
-# have run.services.get in groupCreator (prevents cross-student env var visibility).
-# 'services create' goes direct to the API with no prior GET — needs only run.services.create.
-# 'services update' is the redeploy path — needs run.developer which Eventarc
-# grants automatically after the first deploy.
-SERVICE_URL=$(gcloud run services create "$SERVICE_NAME" \
-  --image "$IMAGE_URI" \
-  --project "$PROJECT_ID" \
-  --region "$REGION" \
-  --port 7681 \
-  --concurrency 1 \
-  --min-instances 0 \
-  --timeout 3600 \
-  --set-env-vars "GEMINI_API_KEY=${GEMINI_API_KEY},MODEL_NAME=${MODEL_NAME},TTYD_USER=${TTYD_USER},TTYD_PASS=${TTYD_PASS}" \
-  --format="value(status.url)" \
-  --quiet 2>/tmp/run-create.err) && \
-  echo "  [OK] Service created" || {
-    if grep -qi "already exist" /tmp/run-create.err; then
-      echo "  Service already exists — redeploying..."
-      gcloud run services update "$SERVICE_NAME" \
-        --image "$IMAGE_URI" \
-        --project "$PROJECT_ID" \
-        --region "$REGION" \
-        --port 7681 \
-        --concurrency 1 \
-        --min-instances 0 \
-        --timeout 3600 \
-        --set-env-vars "GEMINI_API_KEY=${GEMINI_API_KEY},MODEL_NAME=${MODEL_NAME},TTYD_USER=${TTYD_USER},TTYD_PASS=${TTYD_PASS}" \
-        --quiet
-      echo "  [OK] Service updated"
-      SERVICE_URL=$(gcloud run services describe "$SERVICE_NAME" \
-        --project "$PROJECT_ID" --region "$REGION" \
-        --format="value(status.url)")
-    else
-      echo "  [ERROR] $(cat /tmp/run-create.err)"; exit 1
-    fi
-  }
+# Uses Cloud Run v2 REST API directly via Python (no gcloud run deploy).
+# gcloud run deploy calls run.services.get before creating — students don't
+# have that permission (prevents cross-student env var visibility).
+# POST /services  → run.services.create only (first deploy)
+# PATCH /services → run.services.update only (redeploy, via run.developer from Eventarc)
+SERVICE_URL=$(PROJECT_ID="$PROJECT_ID" REGION="$REGION" SERVICE_NAME="$SERVICE_NAME" \
+  IMAGE_URI="$IMAGE_URI" GEMINI_API_KEY="$GEMINI_API_KEY" MODEL_NAME="$MODEL_NAME" \
+  TTYD_USER="$TTYD_USER" TTYD_PASS="$TTYD_PASS" \
+  python3 - <<'PYEOF'
+import json, os, sys, time, subprocess, urllib.request, urllib.error
+
+def get_token():
+    r = subprocess.run(["gcloud", "auth", "print-access-token"],
+                       capture_output=True, text=True, check=True)
+    return r.stdout.strip()
+
+def call(method, url, token, body=None):
+    data = json.dumps(body).encode() if body else None
+    req  = urllib.request.Request(url, data=data, method=method)
+    req.add_header("Authorization", f"Bearer {token}")
+    if data:
+        req.add_header("Content-Type", "application/json")
+    try:
+        with urllib.request.urlopen(req) as r:
+            return r.status, json.loads(r.read())
+    except urllib.error.HTTPError as e:
+        return e.code, json.loads(e.read())
+
+token   = get_token()
+project = os.environ["PROJECT_ID"]
+region  = os.environ["REGION"]
+svc     = os.environ["SERVICE_NAME"]
+base    = f"https://run.googleapis.com/v2/projects/{project}/locations/{region}/services"
+
+body = {
+    "template": {
+        "containers": [{
+            "image": os.environ["IMAGE_URI"],
+            "ports": [{"containerPort": 7681}],
+            "env": [{"name": k, "value": os.environ[k]}
+                    for k in ["GEMINI_API_KEY", "MODEL_NAME", "TTYD_USER", "TTYD_PASS"]],
+            "resources": {"limits": {"cpu": "1000m", "memory": "512Mi"}}
+        }],
+        "maxInstanceRequestConcurrency": 1,
+        "scaling": {"minInstanceCount": 0},
+        "timeout": "3600s"
+    },
+    "ingress": "INGRESS_TRAFFIC_ALL"
+}
+
+# First deploy: POST (run.services.create — in groupCreator)
+status, resp = call("POST", f"{base}?serviceId={svc}", token, body)
+
+if status == 409:
+    # Redeploy: PATCH (run.services.update — in run.developer granted by Eventarc)
+    print("  Service exists — redeploying...", file=sys.stderr, flush=True)
+    body["name"] = f"projects/{project}/locations/{region}/services/{svc}"
+    status, resp = call("PATCH", f"{base}/{svc}", token, body)
+
+if status not in (200, 201):
+    msg = resp.get("error", {}).get("message", str(resp))
+    print(f"  [ERROR] {msg}", file=sys.stderr)
+    sys.exit(1)
+
+# Poll LRO until service is ready
+op = resp.get("name", "")
+print("  Waiting for service to be ready...", file=sys.stderr, flush=True)
+for _ in range(72):  # up to 6 minutes
+    time.sleep(5)
+    _, state = call("GET", f"https://run.googleapis.com/v2/{op}", token)
+    if state.get("done"):
+        if "error" in state:
+            print(f"  [ERROR] {state['error']}", file=sys.stderr)
+            sys.exit(1)
+        print(state.get("response", {}).get("uri", ""))
+        sys.exit(0)
+    print("  ...", file=sys.stderr, flush=True)
+
+print("  [ERROR] Timed out waiting for deployment", file=sys.stderr)
+sys.exit(1)
+PYEOF
+)
 
 echo ""
 echo "Your app is live at: $SERVICE_URL"

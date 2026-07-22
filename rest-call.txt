@@ -1,0 +1,25 @@
+
+curl -s -w "\nHTTP_STATUS:%{http_code}" \
+  -X POST \
+  "https://run.googleapis.com/v2/projects/cit-setup/locations/us-central1/services?serviceId=llm-app-madhan-kumar" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "template": {
+      "containers": [{
+        "image": "us-central1-docker.pkg.dev/cit-setup/llm-app-madhan-kumar/llm-app-madhan-kumar:latest",
+        "ports": [{"containerPort": 7681}],
+        "env": [
+          {"name": "GEMINI_API_KEY", "value": "test-key"},
+          {"name": "MODEL_NAME",     "value": "gemini-2.5-flash"},
+          {"name": "TTYD_USER",      "value": "testuser"},
+          {"name": "TTYD_PASS",      "value": "testpass"}
+        ],
+        "resources": {"limits": {"cpu": "1000m", "memory": "512Mi"}}
+      }],
+      "maxInstanceRequestConcurrency": 1,
+      "scaling": {"minInstanceCount": 0},
+      "timeout": "3600s"
+    },
+    "ingress": "INGRESS_TRAFFIC_ALL"
+  }'

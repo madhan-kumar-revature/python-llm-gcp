@@ -73,6 +73,7 @@ description: "List Cloud Run services only. Granted per-user by Eventarc after d
 stage: GA
 includedPermissions:
   - run.services.list
+  - run.locations.list
 EOF
 
 gcloud iam roles create groupViewer \
@@ -136,6 +137,15 @@ gcloud projects add-iam-policy-binding "$PROJECT_ID" \
   --role="roles/resourcemanager.projectIamAdmin" \
   --condition=None --quiet
 echo "  [OK] projectIamAdmin granted to function SA"
+
+# Function SA must actAs the Compute SA (the Cloud Run runtime identity) to
+# update a service and stamp the owner=<email> billing label. Without this,
+# update_service fails with 403 iam.serviceaccounts.actAs and the label is skipped.
+gcloud iam service-accounts add-iam-policy-binding "$COMPUTE_SA" \
+  --member="serviceAccount:$FUNCTION_SA" \
+  --role="roles/iam.serviceAccountUser" \
+  --project="$PROJECT_ID" --quiet
+echo "  [OK] iam.serviceAccountUser on Compute SA granted to function SA"
 
 PUBSUB_SA="service-${PROJECT_NUMBER}@gcp-sa-pubsub.iam.gserviceaccount.com"
 
@@ -209,6 +219,38 @@ gcloud functions deploy "$FUNCTION_NAME" \
   --project="$PROJECT_ID" \
   --quiet
 echo "  [OK] Cloud Function deployed: $FUNCTION_NAME"
+
+# The deploy above created ONE trigger (v1 CreateService). But each Eventarc
+# audit-log trigger matches exactly one methodName, and gcloud emits different
+# method names depending on its version and whether it's a new deploy or a
+# redeploy:
+#   v1: CreateService / ReplaceService     v2: CreateService / UpdateService
+# We add a trigger for each remaining method so EVERY deploy — any gcloud
+# version, new or redeploy — fires the function. This is what makes isolation
+# apply dynamically for all future users (newer clients use the v2 API, which
+# the original v1-only trigger silently missed) and self-heal on redeploys.
+EXTRA_METHODS=(
+  "google.cloud.run.v2.Services.CreateService"
+  "google.cloud.run.v1.Services.ReplaceService"
+  "google.cloud.run.v2.Services.UpdateService"
+)
+mi=0
+for M in "${EXTRA_METHODS[@]}"; do
+  mi=$((mi + 1))
+  gcloud eventarc triggers create "${FUNCTION_NAME}-m${mi}" \
+    --location="$REGION" \
+    --destination-run-service="$FUNCTION_NAME" \
+    --destination-run-region="$REGION" \
+    --destination-run-path="/" \
+    --event-filters="type=google.cloud.audit.log.v1.written" \
+    --event-filters="serviceName=run.googleapis.com" \
+    --event-filters="methodName=${M}" \
+    --service-account="$FUNCTION_SA" \
+    --project="$PROJECT_ID" \
+    --quiet 2>/dev/null && echo "  [OK] trigger for ${M}" \
+    || echo "  [OK] trigger for ${M} already exists"
+done
+echo "  [OK] All deploy-method triggers ensured (v1+v2, create+redeploy)"
 
 # ─── Phase 5: Org Policies ────────────────────────────────────────────────────
 echo ""

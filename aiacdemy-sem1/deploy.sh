@@ -214,16 +214,13 @@ echo "Deploying to Cloud Run..."
 # have that permission (prevents cross-student env var visibility).
 # POST /services  → run.services.create only (first deploy)
 # PATCH /services → run.services.update only (redeploy, via run.developer from Eventarc)
-SERVICE_URL=$(PROJECT_ID="$PROJECT_ID" REGION="$REGION" SERVICE_NAME="$SERVICE_NAME" \
+TOKEN=$(gcloud auth print-access-token)
+
+SERVICE_URL=$(TOKEN="$TOKEN" PROJECT_ID="$PROJECT_ID" REGION="$REGION" SERVICE_NAME="$SERVICE_NAME" \
   IMAGE_URI="$IMAGE_URI" GEMINI_API_KEY="$GEMINI_API_KEY" MODEL_NAME="$MODEL_NAME" \
   TTYD_USER="$TTYD_USER" TTYD_PASS="$TTYD_PASS" \
   python3 - <<'PYEOF'
-import json, os, sys, time, subprocess, urllib.request, urllib.error
-
-def get_token():
-    r = subprocess.run(["gcloud", "auth", "print-access-token"],
-                       capture_output=True, text=True, check=True)
-    return r.stdout.strip()
+import json, os, sys, time, urllib.request, urllib.error
 
 def call(method, url, token, body=None):
     data = json.dumps(body).encode() if body else None
@@ -237,7 +234,7 @@ def call(method, url, token, body=None):
     except urllib.error.HTTPError as e:
         return e.code, json.loads(e.read())
 
-token   = get_token()
+token   = os.environ["TOKEN"]
 project = os.environ["PROJECT_ID"]
 region  = os.environ["REGION"]
 svc     = os.environ["SERVICE_NAME"]

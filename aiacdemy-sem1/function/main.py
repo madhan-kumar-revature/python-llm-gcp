@@ -7,16 +7,24 @@ from google.protobuf.field_mask_pb2 import FieldMask
 @functions_framework.cloud_event
 def auto_grant(cloud_event):
     """
-    Triggered by Eventarc on every Cloud Run audit log event.
-    On CreateService: grants the creator run.developer on their service,
-    sets public access (allUsers → run.invoker), and stamps an owner label.
+    Triggered by Eventarc on Cloud Run audit log events.
+    On any deploy — create or redeploy, via the v1 or v2 API — grants the creator
+    run.developer on their service, sets public access (allUsers → run.invoker),
+    and stamps an owner label. Handling redeploys (and both API versions) makes
+    isolation self-healing and version-agnostic: every deploy from any gcloud
+    client re-applies the creator's grants, so a service that ever lost its
+    bindings is fixed on the next deploy without any manual admin action.
     """
     data = cloud_event.data
     proto = data.get("protoPayload", {})
 
-    # Only act on service creation
+    # Act on service create and redeploy, covering BOTH Cloud Run API versions:
+    #   v1: CreateService (new)   / ReplaceService (redeploy)
+    #   v2: CreateService (new)   / UpdateService  (redeploy)
+    # gcloud picks v1 or v2 depending on its version, so we must match all of
+    # them or newer clients (v2) are silently missed.
     method = proto.get("methodName", "")
-    if "CreateService" not in method:
+    if not any(m in method for m in ("CreateService", "ReplaceService", "UpdateService")):
         return
 
     creator = proto.get("authenticationInfo", {}).get("principalEmail", "")
@@ -24,6 +32,14 @@ def auto_grant(cloud_event):
 
     if not creator or not resource:
         print("Missing creator or resource name in audit log — skipping.")
+        return
+
+    # Loop guard: skip events initiated by any service account — most importantly
+    # this function's own label-stamp, which emits v2 UpdateService (the same
+    # method we now listen for). A human deploy is never a service account, so
+    # this both breaks the self-trigger loop and avoids granting to SAs.
+    if creator.endswith(".gserviceaccount.com"):
+        print(f"Skipping service-account event ({method}) by {creator}")
         return
 
     # Audit log gives v1 format: namespaces/{project}/services/{name}
@@ -38,7 +54,7 @@ def auto_grant(cloud_event):
         # v2 format already: projects/{project}/locations/{region}/services/{name}
         project = resource.split("/")[1]
 
-    print(f"CreateService detected: creator={creator} resource={resource}")
+    print(f"{method.rsplit('.', 1)[-1]} detected: creator={creator} resource={resource}")
 
     client = run_v2.ServicesClient()
 

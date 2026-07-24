@@ -1,4 +1,5 @@
 from google import genai
+from google.genai import types
 from config import GEMINI_API_KEY, MODEL_NAME
 
 class LLMClient:
@@ -10,9 +11,12 @@ class LLMClient:
 
     def ask(self, prompt: str):
 
-        response = self.client.models.generate_content(
+        for chunk in self.client.models.generate_content_stream(
             model=MODEL_NAME,
-            contents=prompt
-        )
-
-        return response.text
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                thinking_config=types.ThinkingConfig(thinking_budget=0)
+            )
+        ):
+            if chunk.text:
+                yield chunk.text

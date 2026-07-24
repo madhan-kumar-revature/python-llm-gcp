@@ -14,10 +14,10 @@ def main():
         if question.lower() == "exit":
             break
 
-        answer = llm.ask(question)
-
         print("\nAssistant:")
-        print(answer)
+        for chunk in llm.ask(question):
+            print(chunk, end="", flush=True)
+        print()
 
 if __name__ == "__main__":
     main()
